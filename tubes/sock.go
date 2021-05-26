@@ -13,7 +13,7 @@ func FromConn(conn net.Conn) *Tube {
 	return NewTube(&sock{conn})
 }
 
-func (s *sock) shutdown(TubeDirection) error {
+func (s *sock) Shutdown(TubeDirection) error {
 	return s.Close()
 }
 

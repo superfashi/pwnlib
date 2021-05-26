@@ -28,19 +28,19 @@ func TestPython(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	line, _ := cmd.ReadLine()
+	line, _ := cmd.RecvLine()
 	if !bytes.Equal(line, []byte("Hello world")) {
 		t.Fatal("process output mismatch")
 	}
-	line, _ = cmd.ReadUntil(false, ',')
+	line, _ = cmd.RecvUntil(false, ',')
 	if !bytes.Equal(line, []byte("Wow,")) {
 		t.Fatal("process output mismatch")
 	}
-	line, _ = cmd.ReadRegex(regexp.MustCompile(`.*data`), false)
+	line, _ = cmd.RecvRegex(regexp.MustCompile(`.*data`), false)
 	if !bytes.Equal(line, []byte(" such data")) {
 		t.Fatal("process output mismatch")
 	}
-	line, _ = cmd.Read(-1)
+	line, _ = cmd.Recv(2)
 	if !bytes.Equal(line, cmd.Newline) {
 		t.Fatal("process output mismatch")
 	}

@@ -16,7 +16,7 @@ func TestRemoteApple(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := tube.ReadN(4)
+	b, err := tube.RecvN(4)
 	if err != nil {
 		t.Fatal(err)
 	}

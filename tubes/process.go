@@ -12,7 +12,7 @@ type cmdWrapper struct {
 	cmd     *exec.Cmd
 }
 
-func (c *cmdWrapper) shutdown(direction TubeDirection) (err error) {
+func (c *cmdWrapper) Shutdown(direction TubeDirection) (err error) {
 	if direction&Read != 0 {
 		err = c.outRead.Close()
 	}

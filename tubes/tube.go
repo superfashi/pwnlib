@@ -12,18 +12,9 @@ import (
 	"time"
 )
 
-type tubeInner interface {
-	io.WriteCloser
-	shutdown(TubeDirection) error
-	setReadTimeout(time.Duration)
-}
-
-type TubeIf interface {
-	io.Reader
-	tubeInner
-}
-
 type TubeDirection uint8
+
+const bufferSize = 4096
 
 const (
 	Read TubeDirection = iota + 1
@@ -31,65 +22,68 @@ const (
 	Both
 )
 
-type Tube struct {
-	impl   tubeInner
-	reader *bufio.Reader
+type TubeIf interface {
+	io.ReadWriteCloser
+	Shutdown(TubeDirection) error
+}
 
-	KeepEnds bool
-	Newline  []byte
-	//ReadTimeout time.Duration
+type Tube struct {
+	r    *fakeReader
+	impl interface {
+		io.WriteCloser
+		Shutdown(TubeDirection) error
+	}
+
+	KeepLineEnding bool
+	Newline        []byte
+	RecvTimeout    time.Duration
 }
 
 func NewTube(impl TubeIf) *Tube {
-	return &Tube{
-		impl:    impl,
-		reader:  bufio.NewReader(impl),
-		Newline: linebreak,
+	t := &Tube{
+		r:    newFakeReader(impl),
+		impl: impl,
+
+		Newline:     linebreak,
+		RecvTimeout: 10 * time.Second,
 	}
+	return t
 }
 
 func (t *Tube) Clean() {
-	_, _ = t.reader.Discard(t.reader.Buffered())
+	_, _ = t.RecvRepeat()
 }
 
-func (t *Tube) Read(numBytes int) ([]byte, error) {
-	if numBytes <= 0 {
-		numBytes = t.reader.Size()
-	}
-	ret := make([]byte, numBytes)
-	n, err := t.reader.Read(ret)
-	return ret[:n], err
+func (t *Tube) Recv(numBytes int) ([]byte, error) {
+	return t.r.recv(numBytes, t.RecvTimeout, read)
 }
 
-func (t *Tube) ReadAll() ([]byte, error) {
-	return io.ReadAll(t.reader)
+func (t *Tube) RecvAll() ([]byte, error) {
+	return io.ReadAll(t.r)
 }
 
-func (t *Tube) ReadAllString() (string, error) {
-	all, err := io.ReadAll(t.reader)
+func (t *Tube) RecvAllString() (string, error) {
+	all, err := io.ReadAll(t.r)
 	return string(all), err
 }
 
-func (t *Tube) ReadLine() ([]byte, error) {
-	bs, err := t.reader.ReadBytes('\n')
+func (t *Tube) RecvLine() ([]byte, error) {
+	bs, err := t.RecvUntil(!t.KeepLineEnding, '\n')
 	l := len(bs)
-	if !t.KeepEnds && l > 0 && bs[l-1] == '\n' {
-		if l > 1 && bs[l-2] == '\r' {
-			l--
-		}
+	if !t.KeepLineEnding && l > 0 && bs[l-1] == '\r' {
 		bs = bs[:l-1]
 	}
 	return bs, err
 }
 
-func (t *Tube) ReadLineString() (string, error) {
-	line, err := t.ReadLine()
+func (t *Tube) RecvLineString() (string, error) {
+	line, err := t.RecvLine()
 	return string(line), err
 }
 
-func (t *Tube) ReadLinePred(pred func(line []byte) bool) ([]byte, error) {
+func (t *Tube) RecvLinePred(pred func(line []byte) bool) ([]byte, error) {
 	for {
-		line, err := t.ReadLine()
+		line, err := t.RecvLine()
 		if pred(line) {
 			return line, err
 		}
@@ -99,9 +93,9 @@ func (t *Tube) ReadLinePred(pred func(line []byte) bool) ([]byte, error) {
 	}
 }
 
-func (t *Tube) ReadLinePredString(pred func(line string) bool) (string, error) {
+func (t *Tube) RecvLinePredString(pred func(line string) bool) (string, error) {
 	for {
-		line, err := t.ReadLineString()
+		line, err := t.RecvLineString()
 		if pred(line) {
 			return line, err
 		}
@@ -133,52 +127,52 @@ func foldFuncItemsStr(f func(string, string) bool, items ...string) func(line st
 	}
 }
 
-func (t *Tube) ReadLineContains(items ...[]byte) ([]byte, error) {
-	return t.ReadLinePred(foldFuncItems(bytes.Contains, items...))
+func (t *Tube) RecvLineContains(items ...[]byte) ([]byte, error) {
+	return t.RecvLinePred(foldFuncItems(bytes.Contains, items...))
 }
 
-func (t *Tube) ReadLineContainsString(items ...string) (string, error) {
-	return t.ReadLinePredString(foldFuncItemsStr(strings.Contains, items...))
+func (t *Tube) RecvLineContainsString(items ...string) (string, error) {
+	return t.RecvLinePredString(foldFuncItemsStr(strings.Contains, items...))
 }
 
-func (t *Tube) ReadLineStartsWith(items ...[]byte) ([]byte, error) {
-	return t.ReadLinePred(foldFuncItems(bytes.HasPrefix, items...))
+func (t *Tube) RecvLineStartsWith(items ...[]byte) ([]byte, error) {
+	return t.RecvLinePred(foldFuncItems(bytes.HasPrefix, items...))
 }
 
-func (t *Tube) ReadLineStartsWithString(items ...string) (string, error) {
-	return t.ReadLinePredString(foldFuncItemsStr(strings.HasPrefix, items...))
+func (t *Tube) RecvLineStartsWithString(items ...string) (string, error) {
+	return t.RecvLinePredString(foldFuncItemsStr(strings.HasPrefix, items...))
 }
 
-func (t *Tube) ReadLineEndsWith(items ...[]byte) ([]byte, error) {
-	return t.ReadLinePred(foldFuncItems(bytes.HasSuffix, items...))
+func (t *Tube) RecvLineEndsWith(items ...[]byte) ([]byte, error) {
+	return t.RecvLinePred(foldFuncItems(bytes.HasSuffix, items...))
 }
 
-func (t *Tube) ReadLineEndsWithString(items ...string) (string, error) {
-	return t.ReadLinePredString(foldFuncItemsStr(strings.HasSuffix, items...))
+func (t *Tube) RecvLineEndsWithString(items ...string) (string, error) {
+	return t.RecvLinePredString(foldFuncItemsStr(strings.HasSuffix, items...))
 }
 
-func (t *Tube) ReadLineRegex(regex *regexp.Regexp, exact bool) ([]byte, error) {
+func (t *Tube) RecvLineRegex(regex *regexp.Regexp, exact bool) ([]byte, error) {
 	if exact {
-		return t.ReadLinePred(regex.Match)
+		return t.RecvLinePred(regex.Match)
 	}
-	return t.ReadLinePred(func(line []byte) bool {
+	return t.RecvLinePred(func(line []byte) bool {
 		return regex.Find(line) != nil
 	})
 }
 
-func (t *Tube) ReadLineRegexString(regex *regexp.Regexp, exact bool) (string, error) {
+func (t *Tube) RecvLineRegexString(regex *regexp.Regexp, exact bool) (string, error) {
 	if exact {
-		return t.ReadLinePredString(regex.MatchString)
+		return t.RecvLinePredString(regex.MatchString)
 	}
-	return t.ReadLinePredString(func(line string) bool {
+	return t.RecvLinePredString(func(line string) bool {
 		return regex.FindStringIndex(line) != nil
 	})
 }
 
-func (t *Tube) ReadLines(numLines int) ([][]byte, error) {
+func (t *Tube) RecvLines(numLines int) ([][]byte, error) {
 	ret := make([][]byte, 0, numLines)
 	for i := 0; i < numLines; i++ {
-		line, err := t.ReadLine()
+		line, err := t.RecvLine()
 		if err == nil || len(line) > 0 {
 			ret = append(ret, line)
 		}
@@ -189,10 +183,10 @@ func (t *Tube) ReadLines(numLines int) ([][]byte, error) {
 	return ret, nil
 }
 
-func (t *Tube) ReadLinesString(numLines int) ([]string, error) {
+func (t *Tube) RecvLinesString(numLines int) ([]string, error) {
 	ret := make([]string, 0, numLines)
 	for i := 0; i < numLines; i++ {
-		line, err := t.ReadLineString()
+		line, err := t.RecvLineString()
 		if err == nil || len(line) > 0 {
 			ret = append(ret, line)
 		}
@@ -203,94 +197,90 @@ func (t *Tube) ReadLinesString(numLines int) ([]string, error) {
 	return ret, nil
 }
 
-func (t *Tube) ReadN(numBytes int) ([]byte, error) {
+func (t *Tube) RecvN(numBytes int) ([]byte, error) {
 	ret := make([]byte, numBytes)
-	_, err := io.ReadFull(t.reader, ret)
+	_, err := io.ReadFull(t.r, ret)
 	return ret, err
 }
 
-func (t *Tube) ReadStringN(numRunes int) (string, error) {
-	var r []rune
-	for i := 0; i < numRunes; i++ {
-		ru, _, err := t.reader.ReadRune()
-		if err != nil {
-			return string(r), err
-		}
-		r = append(r, ru)
-	}
-	return string(r), nil
-}
-
-func (t *Tube) ReadPred(pred func([]byte) bool) ([]byte, error) {
+func (t *Tube) RecvPred(pred func([]byte) bool) ([]byte, error) {
 	var ret []byte
 	for {
-		b, err := t.reader.ReadByte()
+		b, err := t.Recv(1)
 		if err != nil {
 			return ret, err
 		}
-		ret = append(ret, b)
+		ret = append(ret, b...)
 		if pred(ret) {
 			return ret, nil
 		}
 	}
 }
 
-func (t *Tube) ReadPredString(pred func(string) bool) (string, error) {
-	var ret []rune
-	for {
-		r, _, err := t.reader.ReadRune()
-		if err != nil {
-			return string(ret), err
-		}
-		ret = append(ret, r)
-		str := string(ret)
-		if pred(str) {
-			return str, nil
-		}
-	}
-}
-
-func (t *Tube) ReadRegex(regex *regexp.Regexp, exact bool) ([]byte, error) {
+func (t *Tube) RecvRegex(regex *regexp.Regexp, exact bool) ([]byte, error) {
 	if exact {
-		return t.ReadPred(regex.Match)
+		return t.RecvPred(regex.Match)
 	}
-	return t.ReadPred(func(line []byte) bool {
+	return t.RecvPred(func(line []byte) bool {
 		return regex.Find(line) != nil
 	})
 }
 
-func (t *Tube) ReadRegexString(regex *regexp.Regexp, exact bool) (string, error) {
-	if exact {
-		return t.ReadPredString(regex.MatchString)
+func (t *Tube) recvRepeat(timeout time.Duration) ([]byte, error) {
+	const bufferSize = 4096
+	var ret []byte
+	end := time.Now().Add(timeout)
+	remaining := timeout
+
+	for remaining > 0 {
+		recv, err := t.r.recv(bufferSize, remaining, read)
+		ret = append(ret, recv...)
+		if err != nil {
+			return ret, err
+		}
+		remaining = end.Sub(time.Now())
 	}
-	return t.ReadPredString(func(line string) bool {
-		return regex.FindStringIndex(line) != nil
-	})
+	return ret, nil
 }
 
-// TODO: recvrepeat
+func (t *Tube) RecvRepeat() ([]byte, error) {
+	if t.RecvTimeout <= 0 {
+		return t.RecvAll()
+	}
 
-func (t *Tube) ReadUntil(dropEnding bool, delims ...byte) ([]byte, error) {
 	var ret []byte
-	matched := false
-	for {
-		needRead := t.reader.Buffered()
-		if needRead <= 0 {
-			needRead = t.reader.Size()
+	remaining := t.RecvTimeout
+	end := time.Now().Add(t.RecvTimeout)
+
+	for remaining > 0 {
+		recv, err := t.r.recv(bufferSize, remaining, read)
+		ret = append(ret, recv...)
+		if err != nil {
+			return ret, err
 		}
-		peek, err := t.reader.Peek(needRead)
+		remaining = end.Sub(time.Now())
+	}
+	return ret, nil
+}
+
+func (t *Tube) RecvUntil(dropEnding bool, delims ...byte) ([]byte, error) {
+	var ret []byte
+	start := time.Now()
+	end := start.Add(t.RecvTimeout)
+
+	matched := false
+	for end.Before(start) || time.Now().Before(end) {
+		recv, err := t.r.recv(bufferSize, end.Sub(start), peek)
 		for _, d := range delims {
-			index := bytes.IndexByte(peek, d)
+			index := bytes.IndexByte(recv, d)
 			if index != -1 {
-				peek = peek[:index+1]
+				recv = recv[:index+1]
 				matched = true
 				break
 			}
 		}
-		ret = append(ret, peek...)
-		if _, e := t.reader.Discard(len(peek)); e != nil {
-			panic(e)
-		}
+		ret = append(ret, recv...)
+		t.r.discard(len(recv))
 		if matched {
 			if dropEnding {
 				ret = ret[:len(ret)-1]
@@ -301,25 +291,8 @@ func (t *Tube) ReadUntil(dropEnding bool, delims ...byte) ([]byte, error) {
 			return ret, err
 		}
 	}
-}
 
-func (t *Tube) ReadUntilString(dropEnding bool, delims ...rune) (string, error) {
-	var ret []rune
-	for {
-		r, _, err := t.reader.ReadRune()
-		if err != nil {
-			return string(ret), err
-		}
-		for _, d := range delims {
-			if r == d {
-				if !dropEnding {
-					ret = append(ret, r)
-				}
-				return string(ret), nil
-			}
-		}
-		ret = append(ret, r)
-	}
+	return ret, nil
 }
 
 func (t *Tube) Send(data []byte) (int, error) {
@@ -327,7 +300,7 @@ func (t *Tube) Send(data []byte) (int, error) {
 }
 
 func (t *Tube) SendAfter(data []byte, delims ...byte) (int, error) {
-	_, err := t.ReadUntil(false, delims...)
+	_, err := t.RecvUntil(false, delims...)
 	if err != nil {
 		return 0, err
 	}
@@ -339,7 +312,7 @@ func (t *Tube) SendLine(data []byte) (int, error) {
 }
 
 func (t *Tube) SendLineAfter(data []byte, delims ...byte) (int, error) {
-	_, err := t.ReadUntil(false, delims...)
+	_, err := t.RecvUntil(false, delims...)
 	if err != nil {
 		return 0, err
 	}
@@ -349,7 +322,7 @@ func (t *Tube) SendLineAfter(data []byte, delims ...byte) (int, error) {
 func (t *Tube) SendThen(data []byte, delims ...byte) (int, error) {
 	s, err := t.Send(data)
 	if err == nil {
-		_, err = t.ReadUntil(false, delims...)
+		_, err = t.RecvUntil(false, delims...)
 	}
 	return s, err
 }
@@ -357,7 +330,7 @@ func (t *Tube) SendThen(data []byte, delims ...byte) (int, error) {
 func (t *Tube) SendLineThen(data []byte, delims ...byte) (int, error) {
 	s, err := t.SendLine(data)
 	if err == nil {
-		_, err = t.ReadUntil(false, delims...)
+		_, err = t.RecvUntil(false, delims...)
 	}
 	return s, err
 }
@@ -367,25 +340,25 @@ func (t *Tube) Close() error {
 }
 
 func (t *Tube) SpawnProcess(cmd *exec.Cmd) error {
-	cmd.Stdin = t.reader
+	cmd.Stdin = t.r
 	cmd.Stdout = t.impl
 	cmd.Stderr = t.impl
 	return cmd.Start()
 }
 
 func (t *Tube) Stream() (int64, error) {
-	return io.Copy(os.Stdout, t.reader)
+	return io.Copy(os.Stdout, t.r)
 }
 
 func (t *Tube) ConnectInput(other *Tube) {
 	go func() {
-		_, _ = io.Copy(t.impl, other.reader)
+		_, _ = io.Copy(t.impl, other.r)
 	}()
 }
 
 func (t *Tube) ConnectOutput(other *Tube) {
 	go func() {
-		_, _ = io.Copy(other.impl, t.reader)
+		_, _ = io.Copy(other.impl, t.r)
 	}()
 }
 
@@ -398,7 +371,7 @@ func (t *Tube) Interactive(prompt []byte) {
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
 		defer cancel()
-		_, _ = t.reader.WriteTo(os.Stdout)
+		_, _ = io.Copy(os.Stdout, t.r)
 	}()
 
 	_, _ = os.Stderr.Write(prompt)
@@ -409,13 +382,16 @@ func (t *Tube) Interactive(prompt []byte) {
 	}
 }
 
-// TODO unread
-
-func (t *Tube) Shutdown(direction TubeDirection) error {
-	return t.impl.shutdown(direction)
+func (t *Tube) Unrecv(data []byte) {
+	t.r.unrecv(data)
 }
 
-func (t *Tube) CanRead() bool {
-	_, err := t.reader.ReadByte()
+func (t *Tube) Shutdown(direction TubeDirection) error {
+	return t.impl.Shutdown(direction)
+}
+
+// CanRecv returns true if there is data available within RecvTimeout.
+func (t *Tube) CanRecv() bool {
+	_, err := t.r.recv(1, t.RecvTimeout, peek)
 	return err == nil
 }
