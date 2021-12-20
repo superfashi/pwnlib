@@ -1,1 +1,1 @@
-module pwnlib
+module github.com/superfashi/pwnlib
